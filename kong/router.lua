@@ -956,14 +956,13 @@ do
 
     [MATCH_RULES.HEADER] = function(route_t, ctx)
       ctx.matches.headers = {}
-
-      for _, header_t in ipairs(route_t.headers) do
+      for i = 1, #route_t.headers do
         local found_in_req
+        local header_t = route_t.headers[i]
         local req_header = ctx.req_headers[header_t.name]
-
         if type(req_header) == "table" then
-          for _, req_header_val in ipairs(req_header) do
-            req_header_val = lower(req_header_val)
+          for j = 1, #req_header do
+            local req_header_val = lower(req_header[j])
             if header_t.values_map[req_header_val] then
               found_in_req = true
               ctx.matches.headers[header_t.name] = req_header_val
@@ -1081,16 +1080,14 @@ do
       local method = route_t.methods[ctx.req_method]
       if method then
         ctx.matches.method = ctx.req_method
-
         return true
       end
     end,
 
     [MATCH_RULES.SRC] = function(route_t, ctx)
-      for _, src_t in ipairs(route_t.sources) do
+      for i = 1, #route_t.sources do
+        local src_t = route_t.sources[i]
         local ip_ok
-        local port_ok
-
         if not src_t.ip then
           ip_ok = true
         elseif src_t.range_f then
@@ -1099,23 +1096,21 @@ do
           ip_ok = src_t.ip == ctx.src_ip
         end
 
-        if not src_t.port or (src_t.port == ctx.src_port) then
-          port_ok = true
-        end
-
-        if ip_ok and port_ok then
-          ctx.matches.src_ip = src_t.ip
-          ctx.matches.src_port = src_t.port
-          return true
+        if ip_ok then
+          if not src_t.port or (src_t.port == ctx.src_port) then
+            ctx.matches.src_ip = src_t.ip
+            ctx.matches.src_port = src_t.port
+            return true
+          end
         end
       end
     end,
 
     [MATCH_RULES.DST] = function(route_t, ctx)
-      for _, dst_t in ipairs(route_t.destinations) do
-        local ip_ok
-        local port_ok
+      for i = 1, #route_t.destinations do
+        local dst_t = route_t.destinations[i]
 
+        local ip_ok
         if not dst_t.ip then
           ip_ok = true
         elseif dst_t.range_f then
@@ -1124,21 +1119,23 @@ do
           ip_ok = dst_t.ip == ctx.dst_ip
         end
 
-        if not dst_t.port or (dst_t.port == ctx.dst_port) then
-          port_ok = true
-        end
-
-        if ip_ok and port_ok then
-          ctx.matches.dst_ip = dst_t.ip
-          ctx.matches.dst_port = dst_t.port
-          return true
+        if ip_ok then
+          if not dst_t.port or (dst_t.port == ctx.dst_port) then
+            ctx.matches.dst_ip = dst_t.ip
+            ctx.matches.dst_port = dst_t.port
+            return true
+          end
         end
       end
     end,
 
     [MATCH_RULES.SNI] = function(route_t, ctx)
-      local sni = route_t.snis[ctx.sni]
-      if sni or ctx.req_scheme == "http" then
+      if ctx.req_scheme == "http" then
+        ctx.matches.sni = ctx.sni
+        return true
+      end
+
+      if route_t.snis[ctx.sni] then
         ctx.matches.sni = ctx.sni
         return true
       end
@@ -1202,27 +1199,13 @@ do
     end,
 
     [MATCH_RULES.SRC] = function(category, ctx)
-      local routes = category.routes_by_sources[ctx.src_ip]
-      if routes then
-        return routes
-      end
-
-      routes = category.routes_by_sources[ctx.src_port]
-      if routes then
-        return routes
-      end
+      return category.routes_by_sources[ctx.src_ip]
+          or category.routes_by_sources[ctx.src_port]
     end,
 
     [MATCH_RULES.DST] = function(category, ctx)
-      local routes = category.routes_by_destinations[ctx.dst_ip]
-      if routes then
-        return routes
-      end
-
-      routes = category.routes_by_destinations[ctx.dst_port]
-      if routes then
-        return routes
-      end
+      return category.routes_by_destinations[ctx.dst_ip]
+          or category.routes_by_destinations[ctx.dst_port]
     end,
 
     [MATCH_RULES.SNI] = function(category, ctx)
@@ -1235,7 +1218,8 @@ do
     local reducers_set = {}
     local header_rule = 0
 
-    for _, bit_match_rule in ipairs(SORTED_MATCH_RULES) do
+    for i = 1, #SORTED_MATCH_RULES do
+      local bit_match_rule = SORTED_MATCH_RULES[i]
       if band(bit_category, bit_match_rule) ~= 0 then
         reducers_count = reducers_count + 1
         reducers_set[reducers_count] = reducers[bit_match_rule]
