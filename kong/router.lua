@@ -7,6 +7,7 @@ local bit           = require "bit"
 
 
 local hostname_type = utils.hostname_type
+local setmetatable  = setmetatable
 local normalize     = require("kong.tools.uri").normalize
 local subsystem     = ngx.config.subsystem
 local get_method    = ngx.req.get_method
@@ -355,13 +356,13 @@ local function marshall_route(r)
     match_weight   = 0,
     submatch_weight = 0,
     max_uri_length = 0,
-    hosts          = {},
-    headers        = {},
-    uris           = {},
-    methods        = {},
-    sources        = {},
-    destinations   = {},
-    snis           = {},
+    hosts          = { [0] = 0 },
+    headers        = { [0] = 0 },
+    uris           = { [0] = 0 },
+    methods        = { [0] = 0 },
+    sources        = { [0] = 0 },
+    destinations   = { [0] = 0 },
+    snis           = { [0] = 0 },
     upstream_url_t = {},
   }
 
@@ -378,7 +379,8 @@ local function marshall_route(r)
     local has_host_plain
     local has_port
 
-    for _, host in ipairs(hosts) do
+    for i = 1, #hosts do
+      local host = hosts[i]
       if type(host) ~= "string" then
         return nil, "hosts values must be strings"
       end
@@ -390,26 +392,28 @@ local function marshall_route(r)
         local wildcard_host_regex = host:gsub("%.", "\\.")
                                         :gsub("%*", ".+") .. "$"
 
+        local _
         _, _, has_port = split_port(host)
         if not has_port then
           wildcard_host_regex = wildcard_host_regex:gsub("%$$", [[(?::\d+)?$]])
         end
 
-        insert(route_t.hosts, {
+        local n = route_t.hosts[0] + 1
+        route_t.hosts[0] = n
+        route_t.hosts[n] = {
           wildcard = true,
           value    = host,
           regex    = wildcard_host_regex,
-        })
+        }
 
       else
         -- plain host matching
         has_host_plain = true
 
+        local n = route_t.hosts[0] + 1
+        route_t.hosts[0] = n
+        route_t.hosts[n] = { value = host }
         route_t.hosts[host] = host
-
-        insert(route_t.hosts, {
-          value = host,
-        })
       end
     end
 
@@ -438,8 +442,6 @@ local function marshall_route(r)
       return nil, "headers field must be a table"
     end
 
-    local has_header_plain
-
     for header_name, header_values in pairs(headers) do
       if type(header_values) ~= "table" then
         return nil, "header values must be a table for header '" ..
@@ -449,22 +451,21 @@ local function marshall_route(r)
       header_name = lower(header_name)
 
       if header_name ~= "host" then
-        -- plain header matching
-        has_header_plain = true
-
         local header_values_map = {}
-        for _, header_value in ipairs(header_values) do
-          header_values_map[lower(header_value)] = true
+        for i = 1, #header_values do
+          header_values_map[lower(header_values[i])] = true
         end
 
-        insert(route_t.headers, {
+        local n = route_t.headers[0] + 1
+        route_t.headers[0] = n
+        route_t.headers[n] = {
           name = header_name,
           values_map = header_values_map,
-        })
+        }
       end
     end
 
-    if has_header_plain then
+    if route_t.headers[0] > 0 then
       route_t.match_rules = bor(route_t.match_rules, MATCH_RULES.HEADER)
       route_t.match_weight = route_t.match_weight + 1
     end
@@ -479,11 +480,14 @@ local function marshall_route(r)
       return nil, "paths field must be a table"
     end
 
-    if #paths > 0 then
+    local count = #paths
+    if count > 0 then
       route_t.match_rules = bor(route_t.match_rules, MATCH_RULES.URI)
       route_t.match_weight = route_t.match_weight + 1
 
-      for _, path in ipairs(paths) do
+      for i = 1, count do
+        local path = paths[i]
+
         if re_find(path, [[^[a-zA-Z0-9\.\-_~/%]*$]]) then
           -- plain URI or URI prefix
 
@@ -492,8 +496,11 @@ local function marshall_route(r)
             value     = normalize(path, true),
           }
 
+          local n = route_t.uris[0] + 1
+          route_t.uris[0] = n
+          route_t.uris[n] = uri_t
           route_t.uris[path] = uri_t
-          insert(route_t.uris, uri_t)
+
           route_t.max_uri_length = max(route_t.max_uri_length, #path)
 
         else
@@ -511,8 +518,10 @@ local function marshall_route(r)
             strip_regex  = strip_regex,
           }
 
+          local n = route_t.uris[0] + 1
+          route_t.uris[0] = n
+          route_t.uris[n] = uri_t
           route_t.uris[path] = uri_t
-          insert(route_t.uris, uri_t)
 
           route_t.submatch_weight = bor(route_t.submatch_weight,
                                         MATCH_SUBRULES.HAS_REGEX_URI)
@@ -530,12 +539,13 @@ local function marshall_route(r)
       return nil, "methods field must be a table"
     end
 
-    if #methods > 0 then
+    local methods_count = #methods
+    if methods_count > 0 then
       route_t.match_rules = bor(route_t.match_rules, MATCH_RULES.METHOD)
       route_t.match_weight = route_t.match_weight + 1
 
-      for _, method in ipairs(methods) do
-        route_t.methods[upper(method)] = true
+      for i = 1, methods_count do
+        route_t.methods[upper(methods[i])] = true
       end
     end
   end
@@ -549,27 +559,30 @@ local function marshall_route(r)
       return nil, "sources field must be a table"
     end
 
-    if #sources > 0 then
+    local count = #sources
+    if count > 0 then
       route_t.match_rules = bor(route_t.match_rules, MATCH_RULES.SRC)
       route_t.match_weight = route_t.match_weight + 1
 
-      for _, source in ipairs(sources) do
+      for i = 1, count do
+        local source = sources[i]
         if type(source) ~= "table" then
           return nil, "sources elements must be tables"
         end
 
         local range_f
-
         if source.ip and find(source.ip, "/", nil, true) then
           local matcher = ipmatcher.new({ source.ip })
           range_f = function(ip) return matcher:match(ip) end
         end
 
-        insert(route_t.sources, {
+        local n = route_t.sources[0] + 1
+        route_t.sources[0] = n
+        route_t.sources[n] = {
           ip = source.ip,
           port = source.port,
           range_f = range_f,
-        })
+        }
       end
     end
   end
@@ -583,27 +596,30 @@ local function marshall_route(r)
       return nil, "destinations field must be a table"
     end
 
-    if #destinations > 0 then
+    local count = #destinations
+    if count > 0 then
       route_t.match_rules = bor(route_t.match_rules, MATCH_RULES.DST)
       route_t.match_weight = route_t.match_weight + 1
 
-      for _, destination in ipairs(destinations) do
+      for i = 1, count do
+        local destination = destinations[i]
         if type(destination) ~= "table" then
           return nil, "destinations elements must be tables"
         end
 
         local range_f
-
         if destination.ip and find(destination.ip, "/", nil, true) then
           local matcher = ipmatcher.new({ destination.ip })
           range_f = function(ip) return matcher:match(ip) end
         end
 
-        insert(route_t.destinations, {
+        local n = route_t.destinations[0] + 1
+        route_t.destinations[0] = n
+        route_t.destinations[n] = {
           ip = destination.ip,
           port = destination.port,
           range_f = range_f,
-        })
+        }
       end
     end
   end
@@ -616,14 +632,17 @@ local function marshall_route(r)
       return nil, "snis field must be a table"
     end
 
-    if #snis > 0 then
-      for _, sni in ipairs(snis) do
+    local count = #snis
+    if count > 0 then
+      route_t.match_rules = bor(route_t.match_rules, MATCH_RULES.SNI)
+      route_t.match_weight = route_t.match_weight + 1
+
+      for i = 1, count do
+        local sni = snis[i]
         if type(sni) ~= "string" then
           return nil, "sni elements must be strings"
         end
 
-        route_t.match_rules = bor(route_t.match_rules, MATCH_RULES.SNI)
-        route_t.match_weight = route_t.match_weight + 1
         route_t.snis[sni] = sni
       end
     end
@@ -1305,9 +1324,9 @@ function _M.new(routes)
   -- when hash lookup in plain_indexes fails, those are arrays
   -- of regexes for `uris` as prefixes and `hosts` as wildcards
   -- or IP ranges comparison functions
-  local prefix_uris    = {} -- will be sorted by length
-  local regex_uris     = {}
-  local wildcard_hosts = {}
+  local prefix_uris     = {} -- will be sorted by length
+  local regex_uris      = {}
+  local wildcard_hosts  = {}
   local src_trust_funcs = {}
   local dst_trust_funcs = {}
 
@@ -1326,37 +1345,40 @@ function _M.new(routes)
   -- index routes
 
   do
-    local marshalled_routes = {}
+    local marshalled_routes = { [0] = 0 }
 
     for i = 1, #routes do
+      local route = routes[i].route
+      if route.id ~= nil then
+        routes_by_id[route.id] = routes[i]
+      end
 
-      local route = utils.deep_copy(routes[i], false)
-      local paths = utils.deep_copy(route.route.paths, false)
-      if paths ~= nil and #paths > 1 then
+      local paths = route.paths
+      local count = paths and #paths or 0
+      if count > 1 then
         -- split routes by paths to sort properly
-        for j = 1, #paths do
-          local index = #marshalled_routes + 1
-          local err
-
+        for j = 1, count do
+          route = utils.deep_copy(routes[i], false)
           route.route.paths = { paths[j] }
-          marshalled_routes[index], err = marshall_route(route)
-          if not marshalled_routes[index] then
+          local route_t, err = marshall_route(route)
+          if not route_t then
             return nil, err
           end
+
+          local n = marshalled_routes[0] + 1
+          marshalled_routes[0] = n
+          marshalled_routes[n] = route_t
         end
 
       else
-        local index = #marshalled_routes + 1
-        local err
-
-        marshalled_routes[index], err = marshall_route(route)
-        if not marshalled_routes[index] then
+        local route_t, err = marshall_route(routes[i])
+        if not route_t then
           return nil, err
         end
-      end
 
-      if routes[i].route.id ~= nil then
-        routes_by_id[routes[i].route.id] = routes[i]
+        local n = marshalled_routes[0] + 1
+        marshalled_routes[0] = n
+        marshalled_routes[n] = route_t
       end
     end
 
