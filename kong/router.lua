@@ -1398,14 +1398,14 @@ function _M.new(routes)
     end
   end
 
-  local match_headers         = plain_indexes.headers[0] > 0
-  local match_hosts           = not isempty(plain_indexes.hosts)
-  local match_wildcard_hosts  = not isempty(wildcard_hosts)
-  local match_regex_uris      = regex_uris[0] > 0
-  local match_uris            = not isempty(plain_indexes.uris)
-  local match_prefix_uris     = prefix_uris[0] > 0
-  local match_methods         = not isempty(plain_indexes.methods)
-  local match_snis            = not isempty(plain_indexes.snis)
+  local match_headers        = plain_indexes.headers[0] > 0
+  local match_prefix_uris    = prefix_uris[0] > 0
+  local match_regex_uris     = regex_uris[0] > 0
+  local match_hosts          = not isempty(plain_indexes.hosts)
+  local match_wildcard_hosts = not isempty(wildcard_hosts)
+  local match_uris           = not isempty(plain_indexes.uris)
+  local match_methods        = not isempty(plain_indexes.methods)
+  local match_snis           = not isempty(plain_indexes.snis)
 
   local function find_route(req_method, req_uri, req_host, req_scheme,
                             src_ip, src_port,
@@ -1510,10 +1510,10 @@ function _M.new(routes)
     -- if trigger headers match rule, ignore routes cache
     local cache_key
     if hits.header_name ~= nil then
-      cache_key = req_method .. "|" .. req_uri .. "|" .. req_host ..
-        "|" .. src_ip  .. "|" .. src_port ..
-        "|" .. dst_ip  .. "|" .. dst_port ..
-        "|" .. sni
+      cache_key = req_method .. "|" .. req_uri .. "|" .. req_host
+                             .. "|" .. src_ip  .. "|" .. src_port
+                             .. "|" .. dst_ip  .. "|" .. dst_port
+                             .. "|" .. sni
       local match_t = cache:get(cache_key)
       if match_t and hits.header_name == nil then
         return match_t
@@ -1823,23 +1823,25 @@ function _M.new(routes)
       -- debug HTTP request header logic
 
       if var.http_kong_debug then
-        if match_t.route then
-          if match_t.route.id then
-            header["Kong-Route-Id"] = match_t.route.id
+        local route = match_t.route
+        if route then
+          if route.id then
+            header["Kong-Route-Id"] = route.id
           end
 
-          if match_t.route.name then
-            header["Kong-Route-Name"] = match_t.route.name
+          if route.name then
+            header["Kong-Route-Name"] = route.name
           end
         end
 
-        if match_t.service then
-          if match_t.service.id then
-            header["Kong-Service-Id"] = match_t.service.id
+        local service = match_t.service
+        if service then
+          if service.id then
+            header["Kong-Service-Id"] = service.id
           end
 
-          if match_t.service.name then
-            header["Kong-Service-Name"] = match_t.service.name
+          if service.name then
+            header["Kong-Service-Name"] = service.name
           end
         end
       end
