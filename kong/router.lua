@@ -1259,7 +1259,7 @@ local function match_src_dst(source, ip, port, funcs)
 end
 
 
-local _M = {}
+local _M = { MATCH_LRUCACHE_SIZE = MATCH_LRUCACHE_SIZE }
 
 
 _M.has_capturing_groups = has_capturing_groups
@@ -1270,7 +1270,7 @@ _M._set_ngx = _set_ngx
 _M.split_port = split_port
 
 
-function _M.new(routes)
+function _M.new(routes, cache, cache_neg)
   if type(routes) ~= "table" then
     return error("expected arg #1 routes to be a table")
   end
@@ -1309,10 +1309,13 @@ function _M.new(routes)
   -- all routes indexed by id
   local routes_by_id = {}
 
+  if not cache then
+    cache = lrucache.new(MATCH_LRUCACHE_SIZE)
+  end
 
-  local cache = lrucache.new(MATCH_LRUCACHE_SIZE)
-  local cache_neg = lrucache.new(MATCH_LRUCACHE_SIZE)
-
+  if not cache_neg then
+    cache_neg = lrucache.new(MATCH_LRUCACHE_SIZE)
+  end
 
   -- index routes
 
@@ -1539,9 +1542,9 @@ function _M.new(routes)
     -- cache lookup
 
     local cache_key = req_method .. "|" .. req_uri .. "|" .. req_host
-                                 .. "|" .. src_ip  .. "|" .. src_port
-                                 .. "|" .. dst_ip  .. "|" .. dst_port
-                                 .. "|" .. sni .. headers_key
+      .. "|" .. src_ip  .. "|" .. src_port
+      .. "|" .. dst_ip  .. "|" .. dst_port
+      .. "|" .. sni .. headers_key
     local match_t = cache:get(cache_key)
     if match_t then
       return match_t
@@ -1827,7 +1830,7 @@ function _M.new(routes)
         headers, err = get_headers(MAX_REQ_HEADERS)
         if err == "truncated" then
           log(WARN, "retrieved ", MAX_REQ_HEADERS, " headers for evaluation ",
-                    "(max) but request had more; other headers will be ignored")
+              "(max) but request had more; other headers will be ignored")
         end
 
         headers["host"] = nil
@@ -1885,7 +1888,7 @@ function _M.new(routes)
       local dst_ip = var.server_addr
       local src_port = tonumber(var.remote_port, 10)
       local dst_port = tonumber((ctx or ngx.ctx).host_port, 10)
-                    or tonumber(var.server_port, 10)
+        or tonumber(var.server_port, 10)
       -- error value for non-TLS connections ignored intentionally
       local sni, _ = server_name()
 
