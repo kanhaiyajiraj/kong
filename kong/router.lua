@@ -321,9 +321,9 @@ end
 
 
 local function has_capturing_groups(subj)
-  return (find(subj, "[^\\]%(.-[^\\]%)")
+  return (find(subj, "()", nil, true)
        or find(subj, "^%(.-[^\\]%)")
-       or find(subj, "()", nil, true)) ~= nil
+       or find(subj, "[^\\]%(.-[^\\]%)")) ~= nil
 end
 
 
@@ -1486,7 +1486,7 @@ function _M.new(routes, cache, cache_neg)
     -- according the protocol scheme
     local host_no_port, host_with_port = split_port(req_host,
                                                     req_scheme == "https"
-                                                      and 443 or 80)
+                                                    and 443 or 80)
 
     ctx.host_with_port = host_with_port
     ctx.host_no_port   = host_no_port
