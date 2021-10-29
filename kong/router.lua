@@ -3,6 +3,7 @@ local ipmatcher     = require "resty.ipmatcher"
 local lrucache      = require "resty.lrucache"
 local utils         = require "kong.tools.utils"
 local isempty       = require "table.isempty"
+local clone         = require "table.clone"
 local bit           = require "bit"
 
 
@@ -17,6 +18,7 @@ local re_find       = ngx.re.find
 local header        = ngx.header
 local var           = ngx.var
 local ngx_log       = ngx.log
+local concat        = table.concat
 local sort          = table.sort
 local byte          = string.byte
 local upper         = string.upper
@@ -321,7 +323,7 @@ end
 local function has_capturing_groups(subj)
   return (find(subj, "[^\\]%(.-[^\\]%)")
        or find(subj, "^%(.-[^\\]%)")
-       or find(subj, "%(%)")) ~= nil
+       or find(subj, "()", nil, true)) ~= nil
 end
 
 
@@ -1309,6 +1311,7 @@ function _M.new(routes)
 
 
   local cache = lrucache.new(MATCH_LRUCACHE_SIZE)
+  local cache_neg = lrucache.new(MATCH_LRUCACHE_SIZE)
 
 
   -- index routes
@@ -1495,29 +1498,57 @@ function _M.new(routes)
 
     -- header match
 
-    if match_headers then
-      for i = 1, plain_indexes.headers[0] do
-        local header_name = plain_indexes.headers[i]
-        if req_headers[header_name] then
-          req_category = bor(req_category, MATCH_RULES.HEADER)
-          hits.header_name = header_name
-          break
+    local headers_key do
+      local headers_count
+      if match_headers then
+        for i = 1, plain_indexes.headers[0] do
+          local name = plain_indexes.headers[i]
+          local value = req_headers[name]
+          if value then
+            if type(value) == "table" then
+              value = clone(value)
+              for i = 1, #value do
+                value[i] = lower(value[i])
+              end
+              sort(value)
+              value = concat(value, ", ")
+
+            else
+              value = lower(value)
+            end
+
+            if not headers_count then
+              headers_count = 1
+              headers_key = { "|" .. name .. "=" .. value }
+
+            else
+              headers_count = headers_count + 1
+              headers_key[headers_count] = name .. "=" .. value
+            end
+
+            if not hits.header_name then
+              hits.header_name = name
+              req_category = bor(req_category, MATCH_RULES.HEADER)
+            end
+          end
         end
       end
+      headers_key = headers_key and concat(headers_key, "|") or ""
     end
 
-    -- cache lookup (except for headers-matched Routes)
-    -- if trigger headers match rule, ignore routes cache
-    local cache_key
-    if hits.header_name ~= nil then
-      cache_key = req_method .. "|" .. req_uri .. "|" .. req_host
-                             .. "|" .. src_ip  .. "|" .. src_port
-                             .. "|" .. dst_ip  .. "|" .. dst_port
-                             .. "|" .. sni
-      local match_t = cache:get(cache_key)
-      if match_t and hits.header_name == nil then
-        return match_t
-      end
+    -- cache lookup
+
+    local cache_key = req_method .. "|" .. req_uri .. "|" .. req_host
+                                 .. "|" .. src_ip  .. "|" .. src_port
+                                 .. "|" .. dst_ip  .. "|" .. dst_port
+                                 .. "|" .. sni .. headers_key
+    local match_t = cache:get(cache_key)
+    if match_t then
+      return match_t
+    end
+
+    if cache_neg:get(cache_key) then
+      return
     end
 
     -- host match
@@ -1762,9 +1793,7 @@ function _M.new(routes)
               }
             }
 
-            if cache_key and band(matched_route.match_rules, MATCH_RULES.HEADER) == 0 then
-              cache:set(cache_key, match_t)
-            end
+            cache:set(cache_key, match_t)
 
             return match_t
           end
@@ -1776,6 +1805,7 @@ function _M.new(routes)
     end
 
     -- no match :'(
+    cache_neg:set(cache_key, true)
   end
 
 
@@ -1803,14 +1833,12 @@ function _M.new(routes)
         headers["host"] = nil
       end
 
-      do
-        local idx = find(req_uri, "?", 2, true)
-        if idx then
-          req_uri = sub(req_uri, 1, idx - 1)
-        end
-
-        req_uri = normalize(req_uri, true)
+      local idx = find(req_uri, "?", 2, true)
+      if idx then
+        req_uri = sub(req_uri, 1, idx - 1)
       end
+
+      req_uri = normalize(req_uri, true)
 
       local match_t = find_route(req_method, req_uri, req_host, req_scheme,
                                  nil, nil, -- src_ip, src_port
@@ -1854,8 +1882,8 @@ function _M.new(routes)
 
     function self.exec(ctx)
       local src_ip = var.remote_addr
-      local src_port = tonumber(var.remote_port, 10)
       local dst_ip = var.server_addr
+      local src_port = tonumber(var.remote_port, 10)
       local dst_port = tonumber((ctx or ngx.ctx).host_port, 10)
                     or tonumber(var.server_port, 10)
       -- error value for non-TLS connections ignored intentionally
