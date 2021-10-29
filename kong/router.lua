@@ -17,7 +17,6 @@ local re_find       = ngx.re.find
 local header        = ngx.header
 local var           = ngx.var
 local ngx_log       = ngx.log
-local insert        = table.insert
 local sort          = table.sort
 local byte          = string.byte
 local upper         = string.upper
@@ -26,7 +25,6 @@ local find          = string.find
 local format        = string.format
 local sub           = string.sub
 local tonumber      = tonumber
-local ipairs        = ipairs
 local pairs         = pairs
 local error         = error
 local type          = type
@@ -34,12 +32,20 @@ local max           = math.max
 local band          = bit.band
 local bor           = bit.bor
 
+
 -- limits regex degenerate times to the low miliseconds
 local REGEX_PREFIX  = "(*LIMIT_MATCH=10000)"
 local SLASH         = byte("/")
 
 local ERR           = ngx.ERR
 local WARN          = ngx.WARN
+
+
+local function append(destination, value)
+  local n = destination[0] + 1
+  destination[0] = n
+  destination[n] = value
+end
 
 
 local normalize_regex
@@ -239,10 +245,10 @@ local MATCH_RULES = {
   DST             = 0x00000001,
 }
 
-local SORTED_MATCH_RULES = {}
+local SORTED_MATCH_RULES = { [0] = 0 }
 
 for _, v in pairs(MATCH_RULES) do
-  insert(SORTED_MATCH_RULES, v)
+  append(SORTED_MATCH_RULES, v)
 end
 
 sort(SORTED_MATCH_RULES, function(a, b)
@@ -324,6 +330,14 @@ end
 local protocol_subsystem = constants.PROTOCOLS_WITH_SUBSYSTEM
 
 
+local function create_range_f(ip)
+  if ip and find(ip, "/", nil, true) then
+    local matcher = ipmatcher.new({ ip })
+    return function(ip) return matcher:match(ip) end
+  end
+end
+
+
 local function marshall_route(r)
   local route        = r.route
   local service      = r.service
@@ -398,21 +412,17 @@ local function marshall_route(r)
           wildcard_host_regex = wildcard_host_regex:gsub("%$$", [[(?::\d+)?$]])
         end
 
-        local n = route_t.hosts[0] + 1
-        route_t.hosts[0] = n
-        route_t.hosts[n] = {
+        append(route_t.hosts, {
           wildcard = true,
           value    = host,
           regex    = wildcard_host_regex,
-        }
+        })
 
       else
         -- plain host matching
         has_host_plain = true
 
-        local n = route_t.hosts[0] + 1
-        route_t.hosts[0] = n
-        route_t.hosts[n] = { value = host }
+        append(route_t.hosts, { value = host })
         route_t.hosts[host] = host
       end
     end
@@ -456,12 +466,10 @@ local function marshall_route(r)
           header_values_map[lower(header_values[i])] = true
         end
 
-        local n = route_t.headers[0] + 1
-        route_t.headers[0] = n
-        route_t.headers[n] = {
+        append(route_t.headers, {
           name = header_name,
           values_map = header_values_map,
-        }
+        })
       end
     end
 
@@ -496,11 +504,8 @@ local function marshall_route(r)
             value     = normalize(path, true),
           }
 
-          local n = route_t.uris[0] + 1
-          route_t.uris[0] = n
-          route_t.uris[n] = uri_t
+          append(route_t.uris, uri_t)
           route_t.uris[path] = uri_t
-
           route_t.max_uri_length = max(route_t.max_uri_length, #path)
 
         else
@@ -518,11 +523,8 @@ local function marshall_route(r)
             strip_regex  = strip_regex,
           }
 
-          local n = route_t.uris[0] + 1
-          route_t.uris[0] = n
-          route_t.uris[n] = uri_t
+          append(route_t.uris, uri_t)
           route_t.uris[path] = uri_t
-
           route_t.submatch_weight = bor(route_t.submatch_weight,
                                         MATCH_SUBRULES.HAS_REGEX_URI)
         end
@@ -539,87 +541,13 @@ local function marshall_route(r)
       return nil, "methods field must be a table"
     end
 
-    local methods_count = #methods
-    if methods_count > 0 then
+    local count = #methods
+    if count > 0 then
       route_t.match_rules = bor(route_t.match_rules, MATCH_RULES.METHOD)
       route_t.match_weight = route_t.match_weight + 1
 
-      for i = 1, methods_count do
+      for i = 1, count do
         route_t.methods[upper(methods[i])] = true
-      end
-    end
-  end
-
-
-  -- sources
-
-
-  if sources then
-    if type(sources) ~= "table" then
-      return nil, "sources field must be a table"
-    end
-
-    local count = #sources
-    if count > 0 then
-      route_t.match_rules = bor(route_t.match_rules, MATCH_RULES.SRC)
-      route_t.match_weight = route_t.match_weight + 1
-
-      for i = 1, count do
-        local source = sources[i]
-        if type(source) ~= "table" then
-          return nil, "sources elements must be tables"
-        end
-
-        local range_f
-        if source.ip and find(source.ip, "/", nil, true) then
-          local matcher = ipmatcher.new({ source.ip })
-          range_f = function(ip) return matcher:match(ip) end
-        end
-
-        local n = route_t.sources[0] + 1
-        route_t.sources[0] = n
-        route_t.sources[n] = {
-          ip = source.ip,
-          port = source.port,
-          range_f = range_f,
-        }
-      end
-    end
-  end
-
-
-  -- destinations
-
-
-  if destinations then
-    if type(destinations) ~= "table" then
-      return nil, "destinations field must be a table"
-    end
-
-    local count = #destinations
-    if count > 0 then
-      route_t.match_rules = bor(route_t.match_rules, MATCH_RULES.DST)
-      route_t.match_weight = route_t.match_weight + 1
-
-      for i = 1, count do
-        local destination = destinations[i]
-        if type(destination) ~= "table" then
-          return nil, "destinations elements must be tables"
-        end
-
-        local range_f
-        if destination.ip and find(destination.ip, "/", nil, true) then
-          local matcher = ipmatcher.new({ destination.ip })
-          range_f = function(ip) return matcher:match(ip) end
-        end
-
-        local n = route_t.destinations[0] + 1
-        route_t.destinations[0] = n
-        route_t.destinations[n] = {
-          ip = destination.ip,
-          port = destination.port,
-          range_f = range_f,
-        }
       end
     end
   end
@@ -644,6 +572,64 @@ local function marshall_route(r)
         end
 
         route_t.snis[sni] = sni
+      end
+    end
+  end
+
+
+  -- sources
+
+
+  if sources then
+    if type(sources) ~= "table" then
+      return nil, "sources field must be a table"
+    end
+
+    local count = #sources
+    if count > 0 then
+      route_t.match_rules = bor(route_t.match_rules, MATCH_RULES.SRC)
+      route_t.match_weight = route_t.match_weight + 1
+
+      for i = 1, count do
+        local source = sources[i]
+        if type(source) ~= "table" then
+          return nil, "sources elements must be tables"
+        end
+
+        append(route_t.sources, {
+          ip = source.ip,
+          port = source.port,
+          range_f = create_range_f(source.ip),
+        })
+      end
+    end
+  end
+
+
+  -- destinations
+
+
+  if destinations then
+    if type(destinations) ~= "table" then
+      return nil, "destinations field must be a table"
+    end
+
+    local count = #destinations
+    if count > 0 then
+      route_t.match_rules = bor(route_t.match_rules, MATCH_RULES.DST)
+      route_t.match_weight = route_t.match_weight + 1
+
+      for i = 1, count do
+        local destination = destinations[i]
+        if type(destination) ~= "table" then
+          return nil, "destinations elements must be tables"
+        end
+
+        append(route_t.destinations, {
+          ip = destination.ip,
+          port = destination.port,
+          range_f = create_range_f(destination.ip),
+        })
       end
     end
   end
@@ -688,31 +674,52 @@ local function marshall_route(r)
 end
 
 
+local function index_src_dst(source, indexes, funcs)
+  for i = 1, source[0] do
+    local src_dst_t = source[i]
+    if src_dst_t.ip then
+      indexes[src_dst_t.ip] = true
+
+      if src_dst_t.range_f then
+        append(funcs, src_dst_t.range_f)
+      end
+    end
+
+    if src_dst_t.port then
+      indexes[src_dst_t.port] = true
+    end
+  end
+end
+
+
 local function index_route_t(route_t, plain_indexes, prefix_uris, regex_uris,
                              wildcard_hosts, src_trust_funcs, dst_trust_funcs)
-  for _, host_t in ipairs(route_t.hosts) do
+  for i = 1, route_t.hosts[0] do
+    local host_t = route_t.hosts[i]
     if host_t.wildcard then
-      insert(wildcard_hosts, host_t)
+      append(wildcard_hosts, host_t)
 
     else
       plain_indexes.hosts[host_t.value] = true
     end
   end
 
-  for _, header_t in ipairs(route_t.headers) do
+  for i = 1, route_t.headers[0] do
+    local header_t = route_t.headers[i]
     if not plain_indexes.headers[header_t.name] then
       plain_indexes.headers[header_t.name] = true
-      insert(plain_indexes.headers, header_t.name)
+      append(plain_indexes.headers, header_t.name)
     end
   end
 
-  for _, uri_t in ipairs(route_t.uris) do
+  for i = 1, route_t.uris[0] do
+    local uri_t = route_t.uris[i]
     if uri_t.is_prefix then
       plain_indexes.uris[uri_t.value] = true
-      insert(prefix_uris, uri_t)
+      append(prefix_uris, uri_t)
 
     else
-      insert(regex_uris, uri_t)
+      append(regex_uris, uri_t)
     end
   end
 
@@ -720,37 +727,12 @@ local function index_route_t(route_t, plain_indexes, prefix_uris, regex_uris,
     plain_indexes.methods[method] = true
   end
 
-  for _, src_t in ipairs(route_t.sources) do
-    if src_t.ip then
-      plain_indexes.sources[src_t.ip] = true
-
-      if src_t.range_f then
-        insert(src_trust_funcs, src_t.range_f)
-      end
-    end
-
-    if src_t.port then
-      plain_indexes.sources[src_t.port] = true
-    end
-  end
-
-  for _, dst_t in ipairs(route_t.destinations) do
-    if dst_t.ip then
-      plain_indexes.destinations[dst_t.ip] = true
-
-      if dst_t.range_f then
-        insert(dst_trust_funcs, dst_t.range_f)
-      end
-    end
-
-    if dst_t.port then
-      plain_indexes.destinations[dst_t.port] = true
-    end
-  end
-
   for sni in pairs(route_t.snis) do
     plain_indexes.snis[sni] = true
   end
+
+  index_src_dst(route_t.sources, plain_indexes.sources, src_trust_funcs)
+  index_src_dst(route_t.destinations, plain_indexes.destinations, dst_trust_funcs)
 end
 
 
@@ -759,13 +741,8 @@ local function sort_routes(r1, r2)
     return r1.submatch_weight > r2.submatch_weight
   end
 
-  do
-    local r1_n_headers = #r1.headers
-    local r2_n_headers = #r2.headers
-
-    if r1_n_headers ~= r2_n_headers then
-      return r1_n_headers > r2_n_headers
-    end
+  if r1.headers[0] ~= r2.headers[0] then
+    return r1.headers[0] > r2.headers[0]
   end
 
   -- only regex path use regex_priority
@@ -809,8 +786,8 @@ end
 
 
 local function sort_sources(r1, _)
-  for _, source in ipairs(r1.sources) do
-    if source.ip and source.port then
+  for i = 1, r1.sources[0] do
+    if r1.sources[i].ip and r1.sources[i].port then
       return true
     end
   end
@@ -818,9 +795,55 @@ end
 
 
 local function sort_destinations(r1, _)
-  for _, destination in ipairs(r1.destinations) do
-    if destination.ip and destination.port then
+  for i = 1, r1.destinations[0] do
+    if r1.destinations[i].ip and r1.destinations[i].port then
       return true
+    end
+  end
+end
+
+
+local function categorize(route_t, source, category, key)
+  for i = 1, source[0] do
+    local value = source[i][key or "value"]
+    if category[value] then
+      append(category[value], route_t)
+
+    else
+      category[value] = { [0] = 1, route_t }
+    end
+  end
+end
+
+
+local function categorize_methods_snis(route_t, source, category)
+  for key in pairs(source) do
+    if category[key] then
+      append(category[key], route_t)
+    else
+      category[key] = { [0] = 1, route_t }
+    end
+  end
+end
+
+
+local function categorize_src_dst(route_t, source, category)
+  for i = 1, source[0] do
+    local src_dst_t = source[i]
+    if src_dst_t.ip then
+      if not category[src_dst_t.ip] then
+        category[src_dst_t.ip] = { [0] = 0 }
+      end
+
+      append(category[src_dst_t.ip], route_t)
+    end
+
+    if src_dst_t.port then
+      if not category[src_dst_t.port] then
+        category[src_dst_t.port] = { [0] = 0 }
+      end
+
+      append(category[src_dst_t.port], route_t)
     end
   end
 end
@@ -838,89 +861,20 @@ local function categorize_route_t(route_t, bit_category, categories)
       routes_by_sources      = {},
       routes_by_destinations = {},
       routes_by_sni          = {},
-      all                    = {},
+      all                    = { [0] = 0 },
     }
 
     categories[bit_category] = category
   end
 
-  insert(category.all, route_t)
-
-  for _, host_t in ipairs(route_t.hosts) do
-    if not category.routes_by_hosts[host_t.value] then
-      category.routes_by_hosts[host_t.value] = {}
-    end
-
-    insert(category.routes_by_hosts[host_t.value], route_t)
-  end
-
-  for _, header_t in ipairs(route_t.headers) do
-    if not category.routes_by_headers[header_t.name] then
-      category.routes_by_headers[header_t.name] = {}
-    end
-
-    insert(category.routes_by_headers[header_t.name], route_t)
-  end
-
-  for _, uri_t in ipairs(route_t.uris) do
-    if not category.routes_by_uris[uri_t.value] then
-      category.routes_by_uris[uri_t.value] = {}
-    end
-
-    insert(category.routes_by_uris[uri_t.value], route_t)
-  end
-
-  for method in pairs(route_t.methods) do
-    if not category.routes_by_methods[method] then
-      category.routes_by_methods[method] = {}
-    end
-
-    insert(category.routes_by_methods[method], route_t)
-  end
-
-  for _, src_t in ipairs(route_t.sources) do
-    if src_t.ip then
-      if not category.routes_by_sources[src_t.ip] then
-        category.routes_by_sources[src_t.ip] = {}
-      end
-
-      insert(category.routes_by_sources[src_t.ip], route_t)
-    end
-
-    if src_t.port then
-      if not category.routes_by_sources[src_t.port] then
-        category.routes_by_sources[src_t.port] = {}
-      end
-
-      insert(category.routes_by_sources[src_t.port], route_t)
-    end
-  end
-
-  for _, dst_t in ipairs(route_t.destinations) do
-    if dst_t.ip then
-      if not category.routes_by_destinations[dst_t.ip] then
-        category.routes_by_destinations[dst_t.ip] = {}
-      end
-
-      insert(category.routes_by_destinations[dst_t.ip], route_t)
-    end
-
-    if dst_t.port then
-      if not category.routes_by_destinations[dst_t.port] then
-        category.routes_by_destinations[dst_t.port] = {}
-      end
-
-      insert(category.routes_by_destinations[dst_t.port], route_t)
-    end
-  end
-
-  for sni in pairs(route_t.snis) do
-    if not category.routes_by_sni[sni] then
-      category.routes_by_sni[sni] = {}
-    end
-
-    insert(category.routes_by_sni[sni], route_t)
-  end
+  append(category.all, route_t)
+  categorize(route_t, route_t.hosts, category.routes_by_hosts)
+  categorize(route_t, route_t.headers, category.routes_by_headers, "name")
+  categorize(route_t, route_t.uris, category.routes_by_uris)
+  categorize_methods_snis(route_t, route_t.methods, category.routes_by_methods)
+  categorize_methods_snis(route_t, route_t.snis, category.routes_by_sni)
+  categorize_src_dst(route_t, route_t.sources, category.routes_by_sources)
+  categorize_src_dst(route_t, route_t.destinations, category.routes_by_destinations)
 end
 
 
@@ -945,6 +899,29 @@ local function sanitize_uri_postfix(uri_postfix)
 end
 
 
+local function match_src_dst(source, ctx, ip_name, port_name)
+  for i = 1, source[0] do
+    local src_dst_t = source[i]
+    local ip_ok
+    if not src_dst_t.ip then
+      ip_ok = true
+    elseif src_dst_t.range_f then
+      ip_ok = src_dst_t.range_f(ctx[ip_name])
+    else
+      ip_ok = src_dst_t.ip == ctx[ip_name]
+    end
+
+    if ip_ok then
+      if not src_dst_t.port or (src_dst_t.port == ctx[port_name]) then
+        ctx.matches[ip_name] = src_dst_t.ip
+        ctx.matches[port_name] = src_dst_t.port
+        return true
+      end
+    end
+  end
+end
+
+
 do
   local matchers = {
     [MATCH_RULES.HOST] = function(route_t, ctx)
@@ -955,9 +932,8 @@ do
         return true
       end
 
-      for i = 1, #route_t.hosts do
+      for i = 1, route_t.hosts[0] do
         local host_t = route_t.hosts[i]
-
         if host_t.wildcard then
           local from, _, err = re_find(ctx.host_with_port, host_t.regex, "ajo")
           if err then
@@ -975,7 +951,7 @@ do
 
     [MATCH_RULES.HEADER] = function(route_t, ctx)
       ctx.matches.headers = {}
-      for i = 1, #route_t.headers do
+      for i = 1, route_t.headers[0] do
         local found_in_req
         local header_t = route_t.headers[i]
         local req_header = ctx.req_headers[header_t.name]
@@ -1049,7 +1025,7 @@ do
         end
       end
 
-      for i = 1, #route_t.uris do
+      for i = 1, route_t.uris[0] do
         local uri_t = route_t.uris[i]
 
         if uri_t.is_regex then
@@ -1103,51 +1079,6 @@ do
       end
     end,
 
-    [MATCH_RULES.SRC] = function(route_t, ctx)
-      for i = 1, #route_t.sources do
-        local src_t = route_t.sources[i]
-        local ip_ok
-        if not src_t.ip then
-          ip_ok = true
-        elseif src_t.range_f then
-          ip_ok = src_t.range_f(ctx.src_ip)
-        else
-          ip_ok = src_t.ip == ctx.src_ip
-        end
-
-        if ip_ok then
-          if not src_t.port or (src_t.port == ctx.src_port) then
-            ctx.matches.src_ip = src_t.ip
-            ctx.matches.src_port = src_t.port
-            return true
-          end
-        end
-      end
-    end,
-
-    [MATCH_RULES.DST] = function(route_t, ctx)
-      for i = 1, #route_t.destinations do
-        local dst_t = route_t.destinations[i]
-
-        local ip_ok
-        if not dst_t.ip then
-          ip_ok = true
-        elseif dst_t.range_f then
-          ip_ok = dst_t.range_f(ctx.dst_ip)
-        else
-          ip_ok = dst_t.ip == ctx.dst_ip
-        end
-
-        if ip_ok then
-          if not dst_t.port or (dst_t.port == ctx.dst_port) then
-            ctx.matches.dst_ip = dst_t.ip
-            ctx.matches.dst_port = dst_t.port
-            return true
-          end
-        end
-      end
-    end,
-
     [MATCH_RULES.SNI] = function(route_t, ctx)
       if ctx.req_scheme == "http" then
         ctx.matches.sni = ctx.sni
@@ -1158,6 +1089,14 @@ do
         ctx.matches.sni = ctx.sni
         return true
       end
+    end,
+
+    [MATCH_RULES.SRC] = function(route_t, ctx)
+      return match_src_dst(route_t.sources, ctx, "src_ip", "src_port")
+    end,
+
+    [MATCH_RULES.DST] = function(route_t, ctx)
+      return match_src_dst(route_t.destinations, ctx, "dst_ip", "dst_port")
     end,
   }
 
@@ -1171,11 +1110,11 @@ do
 
     -- build and cache matcher
 
-    local matchers_set = {}
+    local matchers_set = { [0] = 0 }
 
     for _, bit_match_rule in pairs(MATCH_RULES) do
       if band(route_t.match_rules, bit_match_rule) ~= 0 then
-        matchers_set[#matchers_set + 1] = matchers[bit_match_rule]
+        append(matchers_set, matchers[bit_match_rule])
       end
     end
 
@@ -1183,7 +1122,7 @@ do
       -- clear matches context for this try on this route
       clear_tab(ctx.matches)
 
-      for i = 1, #matchers_set do
+      for i = 1, matchers_set[0] do
         if not matchers_set[i](route_t, ctx) then
           return
         end
@@ -1217,6 +1156,10 @@ do
       return category.routes_by_methods[ctx.req_method]
     end,
 
+    [MATCH_RULES.SNI] = function(category, ctx)
+      return category.routes_by_sni[ctx.sni]
+    end,
+
     [MATCH_RULES.SRC] = function(category, ctx)
       return category.routes_by_sources[ctx.src_ip]
           or category.routes_by_sources[ctx.src_port]
@@ -1226,10 +1169,6 @@ do
       return category.routes_by_destinations[ctx.dst_ip]
           or category.routes_by_destinations[ctx.dst_port]
     end,
-
-    [MATCH_RULES.SNI] = function(category, ctx)
-      return category.routes_by_sni[ctx.sni]
-    end,
   }
 
   local build_cached_reducer = function(bit_category)
@@ -1237,7 +1176,7 @@ do
     local reducers_set = {}
     local header_rule = 0
 
-    for i = 1, #SORTED_MATCH_RULES do
+    for i = 1, SORTED_MATCH_RULES[0] do
       local bit_match_rule = SORTED_MATCH_RULES[i]
       if band(bit_category, bit_match_rule) ~= 0 then
         reducers_count = reducers_count + 1
@@ -1258,7 +1197,7 @@ do
           if i == header_rule then
             return candidates
           end
-          local candidates_len = #candidates
+          local candidates_len = candidates[0] or #candidates
           if not smallest_set or candidates_len < min_len then
             min_len = candidates_len
             smallest_set = candidates
@@ -1312,7 +1251,7 @@ function _M.new(routes)
   -- incoming requests/connections
   local plain_indexes = {
     hosts             = {},
-    headers           = {},
+    headers           = { [0] = 0 },
     uris              = {},
     methods           = {},
     sources           = {},
@@ -1324,11 +1263,11 @@ function _M.new(routes)
   -- when hash lookup in plain_indexes fails, those are arrays
   -- of regexes for `uris` as prefixes and `hosts` as wildcards
   -- or IP ranges comparison functions
-  local prefix_uris     = {} -- will be sorted by length
-  local regex_uris      = {}
-  local wildcard_hosts  = {}
-  local src_trust_funcs = {}
-  local dst_trust_funcs = {}
+  local prefix_uris     = { [0] = 0 } -- will be sorted by length
+  local regex_uris      = { [0] = 0 }
+  local wildcard_hosts  = { [0] = 0 }
+  local src_trust_funcs = { [0] = 0 }
+  local dst_trust_funcs = { [0] = 0 }
 
 
   -- all routes grouped by the category they belong to, to reduce
@@ -1365,9 +1304,7 @@ function _M.new(routes)
             return nil, err
           end
 
-          local n = marshalled_routes[0] + 1
-          marshalled_routes[0] = n
-          marshalled_routes[n] = route_t
+          append(marshalled_routes, route_t)
         end
 
       else
@@ -1376,9 +1313,7 @@ function _M.new(routes)
           return nil, err
         end
 
-        local n = marshalled_routes[0] + 1
-        marshalled_routes[0] = n
-        marshalled_routes[n] = route_t
+        append(marshalled_routes, route_t)
       end
     end
 
@@ -1392,9 +1327,8 @@ function _M.new(routes)
 
     sort(marshalled_routes, sort_routes)
 
-    for i = 1, #marshalled_routes do
+    for i = 1, marshalled_routes[0] do
       local route_t = marshalled_routes[i]
-
       categorize_route_t(route_t, route_t.match_rules, categories)
       index_route_t(route_t, plain_indexes, prefix_uris, regex_uris,
                     wildcard_hosts, src_trust_funcs, dst_trust_funcs)
@@ -1404,7 +1338,7 @@ function _M.new(routes)
 
   -- a sorted array of all categories bits (from the most significant
   -- matching-wise, to the least significant)
-  local categories_weight_sorted = {}
+  local categories_weight_sorted = { [0] = 0 }
 
 
   -- a lookup array to get the category_idx from a category_bit. The
@@ -1413,7 +1347,7 @@ function _M.new(routes)
 
 
   for category_bit, category in pairs(categories) do
-    insert(categories_weight_sorted, {
+    append(categories_weight_sorted, {
       category_bit = category_bit,
       match_weight = category.match_weight,
     })
@@ -1421,12 +1355,9 @@ function _M.new(routes)
 
   sort(categories_weight_sorted, sort_categories)
 
-  for i, c in ipairs(categories_weight_sorted) do
-    categories_lookup[c.category_bit] = i
+  for i = 1, categories_weight_sorted[0] do
+    categories_lookup[categories_weight_sorted[i].category_bit] = i
   end
-
-  -- the number of categories to iterate on for this instance of the router
-  local categories_len = #categories_weight_sorted
 
   sort(prefix_uris, sort_uris)
 
@@ -1440,17 +1371,17 @@ function _M.new(routes)
     end
   end
 
-  local match_headers         = not isempty(plain_indexes.headers)
+  local match_headers         = plain_indexes.headers[0] > 0
   local match_hosts           = not isempty(plain_indexes.hosts)
   local match_wildcard_hosts  = not isempty(wildcard_hosts)
-  local match_regex_uris      = not isempty(regex_uris)
+  local match_regex_uris      = regex_uris[0] > 0
   local match_uris            = not isempty(plain_indexes.uris)
-  local match_prefix_uris     = not isempty(prefix_uris)
+  local match_prefix_uris     = prefix_uris[0] > 0
   local match_methods         = not isempty(plain_indexes.methods)
   local match_sources         = not isempty(plain_indexes.sources)
-  local match_src_trust_funcs = not isempty(src_trust_funcs)
+  local match_src_trust_funcs = src_trust_funcs[0] > 0
   local match_destinations    = not isempty(plain_indexes.destinations)
-  local match_dst_trust_funcs = not isempty(dst_trust_funcs)
+  local match_dst_trust_funcs = dst_trust_funcs[0] > 0
   local match_snis            = not isempty(plain_indexes.snis)
 
   local function find_route(req_method, req_uri, req_host, req_scheme,
@@ -1532,7 +1463,8 @@ function _M.new(routes)
     -- header match
 
     if match_headers then
-      for _, header_name in ipairs(plain_indexes.headers) do
+      for i = 1, plain_indexes.headers[0] do
+        local header_name = plain_indexes.headers[i]
         if req_headers[header_name] then
           req_category = bor(req_category, MATCH_RULES.HEADER)
           hits.header_name = header_name
@@ -1558,21 +1490,21 @@ function _M.new(routes)
     -- host match
 
     if match_hosts and (plain_indexes.hosts[host_with_port] or
-      plain_indexes.hosts[host_no_port])
+                        plain_indexes.hosts[host_no_port])
     then
       req_category = bor(req_category, MATCH_RULES.HOST)
 
     elseif match_wildcard_hosts and ctx.req_host then
-      for i = 1, #wildcard_hosts do
-        local from, _, err = re_find(host_with_port, wildcard_hosts[i].regex,
-                                     "ajo")
+      for i = 1, wildcard_hosts[0] do
+        local host = wildcard_hosts[i]
+        local from, _, err = re_find(host_with_port, host.regex, "ajo")
         if err then
           log(ERR, "could not match wildcard host: ", err)
           return
         end
 
         if from then
-          hits.host    = wildcard_hosts[i].value
+          hits.host    = host.value
           req_category = bor(req_category, MATCH_RULES.HOST)
           break
         end
@@ -1582,7 +1514,7 @@ function _M.new(routes)
     -- uri match
 
     if match_regex_uris then
-      for i = 1, #regex_uris do
+      for i = 1, regex_uris[0] do
         local from, _, err = re_find(req_uri, regex_uris[i].regex, "ajo")
         if err then
           log(ERR, "could not evaluate URI regex: ", err)
@@ -1603,7 +1535,7 @@ function _M.new(routes)
         req_category = bor(req_category, MATCH_RULES.URI)
 
       elseif match_prefix_uris then
-        for i = 1, #prefix_uris do
+        for i = 1, prefix_uris[0] do
           if find(req_uri, prefix_uris[i].value, nil, true) == 1 then
             hits.uri     = prefix_uris[i].value
             req_category = bor(req_category, MATCH_RULES.URI)
@@ -1619,6 +1551,12 @@ function _M.new(routes)
       req_category = bor(req_category, MATCH_RULES.METHOD)
     end
 
+    -- sni match
+
+    if match_snis and plain_indexes.snis[ctx.sni] then
+      req_category = bor(req_category, MATCH_RULES.SNI)
+    end
+
     -- src match
 
     if match_sources then
@@ -1629,7 +1567,7 @@ function _M.new(routes)
         req_category = bor(req_category, MATCH_RULES.SRC)
 
       elseif match_src_trust_funcs then
-        for i = 1, #src_trust_funcs do
+        for i = 1, src_trust_funcs[0] do
           if src_trust_funcs[i](ctx.src_ip) then
             req_category = bor(req_category, MATCH_RULES.SRC)
             break
@@ -1648,19 +1586,13 @@ function _M.new(routes)
         req_category = bor(req_category, MATCH_RULES.DST)
 
       elseif match_dst_trust_funcs then
-        for i = 1, #dst_trust_funcs do
+        for i = 1, dst_trust_funcs[0] do
           if dst_trust_funcs[i](ctx.dst_ip) then
             req_category = bor(req_category, MATCH_RULES.DST)
             break
           end
         end
       end
-    end
-
-    -- sni match
-
-    if match_snis and plain_indexes.snis[ctx.sni] then
-      req_category = bor(req_category, MATCH_RULES.SNI)
     end
 
     --print("highest potential category: ", req_category)
@@ -1672,7 +1604,7 @@ function _M.new(routes)
       local category_idx = categories_lookup[req_category] or 1
       local matched_route
 
-      while category_idx <= categories_len do
+      while category_idx <= categories_weight_sorted[0] do
         local bit_category = categories_weight_sorted[category_idx].category_bit
         local category     = categories[bit_category]
 
